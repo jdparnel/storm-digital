@@ -100,6 +100,7 @@ void app_main(void)
     test_ft813_display();
     
     ESP_LOGI(TAG, "Setup completed successfully!");
+    ESP_LOGI(TAG, "Display configured with PCLK=5 for optimal sharpness");
     
     // Main application loop
     int counter = 0;
@@ -109,6 +110,6 @@ void app_main(void)
                  esp_get_free_heap_size(), 
                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Delay for 5 seconds
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }

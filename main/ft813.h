@@ -83,5 +83,6 @@
 // Public API
 esp_err_t ft813_init(void);
 esp_err_t ft813_draw_hello_world(void);
+void ft813_test_pclk_settings(uint8_t pclk, uint8_t pclk_pol);
 
 #endif // FT813_H

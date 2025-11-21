@@ -256,7 +256,7 @@ esp_err_t ft813_init(void)
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
     
     spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 10*1000*1000,  // 10 MHz
+        .clock_speed_hz = 20*1000*1000,  // 20 MHz (FT813 supports up to 30 MHz)
         .mode = 0,
         .spics_io_num = FT813_PIN_CS,
         .queue_size = 7
@@ -284,6 +284,7 @@ esp_err_t ft813_init(void)
     wr16(FT813_REG_VSYNC1, 3);
     wr8(FT813_REG_SWIZZLE, 0);
     wr8(FT813_REG_PCLK_POL, 1);
+    wr8(FT813_REG_DITHER, 1);  // Enable dithering for smoother gradients
     wr16(FT813_REG_HSIZE, 800);
     wr16(FT813_REG_VSIZE, 480);
     
@@ -296,8 +297,14 @@ esp_err_t ft813_init(void)
     // Enable display
     wr8(FT813_REG_GPIO_DIR, 0x80);
     wr8(FT813_REG_GPIO, 0x80);
-    wr8(FT813_REG_PCLK, 2);
-    wr8(FT813_REG_PWM_DUTY, 128);  // 50% backlight
+    
+    // PCLK=4 provides 30 fps (middle ground: sharp + smooth)
+    // PCLK=3: 41 fps (smoother)
+    // PCLK=5: 24.6 fps (sharpest but flickered)
+    wr8(FT813_REG_PCLK, 4);
+    
+    // Maximum backlight for best visibility
+    wr8(FT813_REG_PWM_DUTY, 255);  // 100% backlight
     
     ESP_LOGI(TAG, "FT813 initialized - black screen should be visible");
     return ESP_OK;
@@ -318,9 +325,15 @@ esp_err_t ft813_draw_hello_world(void)
     cmd32(0x02FFFFFF);  // CLEAR_COLOR_RGB(255,255,255) - white
     cmd32(0x26000007);  // CLEAR(1,1,1)
     cmd32(0x04000000);  // COLOR_RGB(0,0,0) - black text
-    cmd_text(400, 150, 31, FT813_OPT_CENTER, "Hello World!");
-    cmd_text(400, 250, 27, FT813_OPT_CENTER, "FT813 + GD2 Style");
-    cmd_button(300, 320, 200, 60, 28, 0, "Click Me");
+    
+    // Use larger, smoother fonts: 31 (biggest) or 29
+    cmd_text(400, 120, 31, FT813_OPT_CENTER, "Hello World!");
+    cmd_text(400, 200, 29, FT813_OPT_CENTER, "FT813 Display Test");
+    cmd_text(400, 260, 28, FT813_OPT_CENTER, "800x480 Resolution");
+    
+    // 3D button at 41 fps should render smoothly
+    cmd_button(300, 340, 200, 70, 29, 0, "Click Me");
+    
     cmd32(0x00000000);  // DISPLAY
     cmd_swap();
     
@@ -330,4 +343,40 @@ esp_err_t ft813_draw_hello_world(void)
     
     ESP_LOGI(TAG, "Done! Check display for text and button");
     return ESP_OK;
+}
+
+// Test different PCLK and polarity settings
+void ft813_test_pclk_settings(uint8_t pclk, uint8_t pclk_pol)
+{
+    ESP_LOGI(TAG, "Testing PCLK=%u PCLK_POL=%u", pclk, pclk_pol);
+    
+    // Update display timing
+    wr8(FT813_REG_PCLK, 0);  // Disable display during update
+    wr8(FT813_REG_PCLK_POL, pclk_pol);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    wr8(FT813_REG_PCLK, pclk);  // Re-enable with new settings
+    
+    // Redraw screen with settings info
+    cmd_dlstart();
+    cmd32(0x02FFFFFF);  // White background
+    cmd32(0x26000007);  // CLEAR
+    cmd32(0x04000000);  // Black text
+    
+    cmd_text(400, 100, 31, FT813_OPT_CENTER, "Display Timing Test");
+    
+    char buf[64];
+    snprintf(buf, sizeof(buf), "PCLK = %u", pclk);
+    cmd_text(400, 180, 29, FT813_OPT_CENTER, buf);
+    
+    snprintf(buf, sizeof(buf), "PCLK_POL = %u", pclk_pol);
+    cmd_text(400, 240, 29, FT813_OPT_CENTER, buf);
+    
+    cmd_text(400, 320, 28, FT813_OPT_CENTER, "Does text look sharp?");
+    cmd_text(400, 360, 27, FT813_OPT_CENTER, "Compare different settings");
+    
+    cmd32(0x00000000);  // DISPLAY
+    cmd_swap();
+    finish();
+    
+    ESP_LOGI(TAG, "Display updated with PCLK=%u POL=%u", pclk, pclk_pol);
 }
