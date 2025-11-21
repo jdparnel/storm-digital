@@ -6,7 +6,7 @@
 #include "driver/gpio.h"
 
 // ============================================================================
-// GPIO PIN DEFINITIONS
+// FT813 GPIO PIN DEFINITIONS
 // ============================================================================
 #define FT813_SPI_HOST          SPI2_HOST
 #define FT813_PIN_MOSI          GPIO_NUM_11
@@ -39,39 +39,49 @@
 #define FT813_REG_GPIO          0x302094
 #define FT813_REG_PWM_HZ        0x3020D0
 #define FT813_REG_PWM_DUTY      0x3020D4
-#define FT813_REG_TOUCH_TAG     0x30212C
-#define FT813_REG_CMD_WRITE     0x302578
-#define FT813_REG_CMD_READ      0x302574
+#define FT813_REG_FREQUENCY     0x30200C
 
-// Memory addresses
-#define FT813_RAM_DL            0x300000
-#define FT813_RAM_CMD           0x308000
+// Memory Map
+#define FT813_RAM_DL            0x300000    // Display List RAM
+#define FT813_RAM_CMD           0x308000    // Command FIFO RAM
 
-// Display list commands
-#define CMD_DLSTART             0xFFFFFF00
-#define CMD_SWAP                0xFFFFFF01
-#define CMD_TEXT                0xFFFFFF0C
-#define CMD_BUTTON              0xFFFFFF0D
-#define CMD_KEYS                0xFFFFFF0E
-#define CMD_BGCOLOR             0xFFFFFF09
-#define CMD_FGCOLOR             0xFFFFFF0A
-#define CLEAR_COLOR_RGB(r,g,b)  (0x02000000 | ((r)<<16) | ((g)<<8) | (b))
-#define CLEAR(c,s,t)            (0x26000000 | ((c)<<2) | ((s)<<1) | (t))
-#define COLOR_RGB(r,g,b)        (0x04000000 | ((r)<<16) | ((g)<<8) | (b))
-#define TAG(s)                  (0x03000000 | (s))
-#define DISPLAY()               (0x00000000)
+// Command Coprocessor Registers
+#define FT813_REG_CMD_READ      0x3025F8    // Command read pointer (read-only)
+#define FT813_REG_CMD_WRITE     0x3025FC    // Command write pointer
+#define FT813_REG_CMDB_SPACE    0x302574    // Command buffer space (FT81x)
+#define FT813_REG_CMDB_WRITE    0x302578    // Command buffer write (FT81x direct write)
+#define FT813_CMD_FIFO_SIZE     4096        // 4KB command FIFO
 
-// Screen IDs
-typedef enum {
-    SCREEN_HOME = 0,
-    SCREEN_SETTINGS,
-    SCREEN_INFO
-} screen_t;
+// Command Codes (from FTDI Programmer Guide)
+#define FT813_CMD_DLSTART       0xFFFFFF00  // Start new display list
+#define FT813_CMD_SWAP          0xFFFFFF01  // Swap display list
+#define FT813_CMD_TEXT          0xFFFFFF0C  // Draw text
+#define FT813_CMD_BUTTON        0xFFFFFF0D  // Draw button
+#define FT813_CMD_KEYS          0xFFFFFF0E  // Draw key row
+#define FT813_CMD_PROGRESS      0xFFFFFF0F  // Draw progress bar
+#define FT813_CMD_SLIDER        0xFFFFFF10  // Draw slider
+#define FT813_CMD_SCROLLBAR     0xFFFFFF11  // Draw scrollbar
+#define FT813_CMD_TOGGLE        0xFFFFFF12  // Draw toggle switch
+#define FT813_CMD_GAUGE         0xFFFFFF13  // Draw gauge
+#define FT813_CMD_CLOCK         0xFFFFFF14  // Draw clock
+#define FT813_CMD_CALIBRATE     0xFFFFFF15  // Calibrate touchscreen
+#define FT813_CMD_SPINNER       0xFFFFFF16  // Draw spinner
+#define FT813_CMD_STOP          0xFFFFFF17  // Stop spinner
+#define FT813_CMD_SCREENSAVER   0xFFFFFF2F  // Start screensaver
+#define FT813_CMD_SKETCH        0xFFFFFF30  // Start sketch
+#define FT813_CMD_SNAPSHOT      0xFFFFFF1F  // Take snapshot
+#define FT813_CMD_LOGO          0xFFFFFF31  // Play FTDI logo animation
+
+// Text/Button Options
+#define FT813_OPT_CENTER        0x0600      // Center text
+#define FT813_OPT_CENTERX       0x0200      // Center horizontally
+#define FT813_OPT_CENTERY       0x0400      // Center vertically
+#define FT813_OPT_FLAT          0x0100      // No 3D effect
+#define FT813_OPT_SIGNED        0x0100      // Signed number
+#define FT813_OPT_RIGHTX        0x0800      // Right-aligned
 
 // Public API
 esp_err_t ft813_init(void);
-void ft813_draw_screen(screen_t screen);
-screen_t ft813_check_touch(void);
-void ft813_ui_task(void *pvParameters);
+esp_err_t ft813_draw_hello_world(void);
 
 #endif // FT813_H

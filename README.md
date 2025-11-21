@@ -1,9 +1,10 @@
-# ESP32-S3-N16R8 Project
+# ESP32-S3-N16R8 Project with FT813 Display
 
-This is an ESP-IDF project specifically configured for the ESP32-S3-N16R8 module featuring 16MB flash memory and 8MB PSRAM.
+This is an ESP-IDF project for the ESP32-S3-N16R8 module with FT813 EVE graphics controller.
 
 ## Hardware Specifications
 
+### ESP32-S3-N16R8
 - **Chip**: ESP32-S3
 - **Flash**: 16MB
 - **PSRAM**: 8MB (Octal SPI)
@@ -11,14 +12,46 @@ This is an ESP-IDF project specifically configured for the ESP32-S3-N16R8 module
 - **Wi-Fi**: 802.11 b/g/n
 - **Bluetooth**: Bluetooth 5.0 (LE)
 
+### Display
+- **Controller**: FT813 EVE Graphics
+- **Display**: NHD-7.0-800480FT-CSXV-CTP
+- **Resolution**: 800x480
+- **Interface**: SPI @ 10MHz
+- **Touch**: Capacitive (CTP)
+
+## Hardware Connections
+
+### FT813 Display to ESP32-S3 Wiring
+
+| FT813 Signal | ESP32-S3 GPIO | Description |
+|--------------|---------------|-------------|
+| MOSI (SDI)   | GPIO 11       | SPI Master Out |
+| MISO (SDO)   | GPIO 13       | SPI Master In |
+| SCK          | GPIO 12       | SPI Clock |
+| CS           | GPIO 10       | Chip Select |
+| PD (Reset)   | GPIO 5        | Power Down / Reset |
+
+**SPI Configuration:**
+- **Mode**: 0 (CPOL=0, CPHA=0)
+- **Speed**: 10 MHz
+- **Host**: SPI2_HOST
+
+**Important Notes:**
+- ESP32-S3 GPIO26-37 are reserved for flash/PSRAM - do not use for FT813
+- Ensure 3.3V power supply for FT813 display
+- Connect GND between ESP32-S3 and display
+
 ## Features
 
 - ✅ ESP32-S3 dual-core configuration
 - ✅ 16MB flash memory support
-- ✅ 8MB PSRAM initialization and testing
-- ✅ System information display
-- ✅ Memory allocation testing
-- ✅ VS Code integration with tasks
+- ✅ 8MB PSRAM initialization
+- ✅ **FT813 GD2-style driver (WORKING!)**
+- ✅ Text rendering with coprocessor
+- ✅ Button widgets
+- ✅ Graphics primitives
+- 🚧 Touch input (planned)
+- 🚧 Advanced widgets (planned)
 
 ## Prerequisites
 
@@ -28,65 +61,61 @@ Before building this project, make sure you have:
 2. **Espressif toolchain** properly configured
 3. **VS Code** with ESP-IDF extension (optional but recommended)
 
-## Installation
+## Quick Start
 
-### 1. ESP-IDF Setup
-
-If you haven't already, install ESP-IDF:
+### Building and Flashing
 
 ```bash
-# Clone ESP-IDF
-git clone --recursive https://github.com/espressif/esp-idf.git ~/esp/v5.5.1/esp-idf
+# Set up ESP-IDF environment
+source ~/esp/v5.5.1/esp-idf/export.sh
 
-# Navigate to ESP-IDF directory
-cd ~/esp/v5.5.1/esp-idf
-
-# Install ESP-IDF
-./install.sh esp32s3
-
-# Set up environment
-. ./export.sh
-```
-
-### 2. Project Setup
-
-```bash
-# Clone or navigate to this project
-cd /path/to/your/project
-
-# Set the target to ESP32-S3
-idf.py set-target esp32s3
-```
-
-## Building and Flashing
-
-### Using Command Line
-
-```bash
 # Build the project
 idf.py build
 
-# Flash to the ESP32-S3 device
-idf.py flash
-
-# Monitor serial output
-idf.py monitor
-
-# Flash and monitor in one command
+# Flash and monitor
 idf.py flash monitor
 ```
 
-### Using VS Code
+### Expected Output
 
-This project includes pre-configured VS Code tasks:
+```
+I (1290) FT813_GD2: Chip ID: 0x7C (expect 0x7C)
+I (1290) FT813_GD2: FT813 initialized - black screen should be visible
+I (1790) FT813_GD2: Commands complete: RP=WP=112
+I (1790) FT813_GD2: Done! Check display for text and button
+```
 
-- **Ctrl+Shift+P** → **Tasks: Run Task**
-- Choose from:
-  - `ESP-IDF Build` - Build the project
-  - `ESP-IDF Flash` - Flash to device
-  - `ESP-IDF Monitor` - Monitor serial output
-  - `ESP-IDF Clean` - Clean build files
-  - `ESP-IDF Set Target ESP32-S3` - Set target chip
+Display shows:
+- White background
+- "Hello World!" centered text
+- "FT813 + GD2 Style" text
+- "Click Me" button
+
+## Project Structure
+
+```
+├── main/
+│   ├── main.c                 # Application entry point
+│   ├── ft813.c               # FT813 driver (GD2-style)
+│   ├── ft813.h               # FT813 register definitions and API
+│   └── CMakeLists.txt
+├── docs/                      # Datasheets and reference docs
+├── FT813_README.md           # Detailed FT813 documentation
+└── README.md                 # This file
+```
+
+## Documentation
+
+- **[FT813_README.md](FT813_README.md)** - Detailed FT813 driver documentation
+- **[docs/](docs/)** - Hardware datasheets and programming guides
+
+## VS Code Tasks
+
+Pre-configured tasks available via **Ctrl+Shift+P** → **Tasks: Run Task**:
+- `ESP-IDF Build` - Build the project
+- `ESP-IDF Flash` - Flash to device
+- `ESP-IDF Monitor` - Monitor serial output
+- `ESP-IDF Clean` - Clean build files
 
 Or use **Ctrl+Shift+B** to run the default build task.
 
@@ -152,45 +181,36 @@ I (xxx) ESP32S3-N16R8: Successfully allocated 1048576 bytes from PSRAM
 I (xxx) ESP32S3-N16R8: Hello from ESP32-S3-N16R8! Counter: 0
 ```
 
-## Customization
 
-To customize this project for your needs:
+## Next Steps
 
-1. **Modify `main/main.c`** - Add your application logic
-2. **Update `sdkconfig`** - Adjust configuration via `idf.py menuconfig`
-3. **Add components** - Create additional components in separate directories
-4. **Configure pins** - Use ESP32-S3 specific pin definitions
-
-## Pin Configuration
-
-ESP32-S3-N16R8 specific considerations:
-
-- **GPIO0**: Boot mode selection
-- **GPIO19, GPIO20**: USB D-, D+ (USB-Serial-JTAG)
-- **GPIO26-32**: Octal SPI PSRAM (reserved)
-- **GPIO33-37**: Octal SPI Flash (reserved)
-
-Refer to ESP32-S3 datasheet for complete pin mapping.
+- [ ] Implement touch input handling
+- [ ] Add more widget types (gauges, sliders, toggles)
+- [ ] Create custom UI layouts
+- [ ] Integrate with application logic
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Build fails**: Ensure ESP-IDF environment is properly sourced
-2. **Flash fails**: Check USB connection and port permissions
-3. **PSRAM not detected**: Verify hardware and configuration
-4. **Tasks not found**: Make sure ESP-IDF tools are in PATH
+1. **No display output**: Check SPI connections and power
+2. **Chip ID read fails**: Verify CS and SPI clock signals
+3. **Commands not executing**: Check REG_CMD_READ vs REG_CMD_WRITE in logs
+4. **Build fails**: Ensure ESP-IDF v5.5.1 environment is sourced
 
-### Environment Variables
+### Debug Tips
 
-The tasks are configured to work with standard ESP-IDF installation paths. If your installation differs, update the PATH and IDF_PATH in `.vscode/tasks.json`.
-
-## License
-
-This project is provided as-is for development purposes.
+- Monitor serial output for FT813_GD2 log messages
+- Check RP (read pointer) and WP (write pointer) values
+- Verify Chip ID is 0x7C (FT813)
 
 ## Resources
 
 - [ESP32-S3 Datasheet](https://www.espressif.com/sites/default/files/documentation/esp32-s3_datasheet_en.pdf)
-- [ESP-IDF Programming Guide](https://docs.espressif.com/projects/esp-idf/en/latest/)
-- [ESP32-S3 Hardware Reference](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/hw-reference/index.html)
+- [FT813 Datasheet](docs/FT81x.pdf)
+- [FT81X Programmer Guide](docs/FT81X_Series_Programmer_Guide.pdf)
+- [GD2 Library Reference](https://github.com/jamesbowman/gd2-lib)
+
+---
+
+**Status**: ✅ FT813 display working as of November 21, 2025

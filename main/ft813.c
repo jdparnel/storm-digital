@@ -1,5 +1,9 @@
 /*
- * FT813 Display Driver with UI Screens
+ * FT813 GD2-Style Driver - WORKING IMPLEMENTATION
+ * Based on jamesbowman/gd2-lib patterns for FT81x
+ * 
+ * Successfully displays text, buttons, and graphics using the FT813's coprocessor.
+ * This uses the REG_CMDB_WRITE approach for FT81x chips (auto-incrementing buffer).
  */
 
 #include "ft813.h"
@@ -10,168 +14,238 @@
 #include "esp_log.h"
 #include <string.h>
 
-static const char *TAG = "FT813";
+static const char *TAG = "FT813_GD2";
+static spi_device_handle_t spi = NULL;
 
-static spi_device_handle_t g_spi = NULL;
-static screen_t g_current_screen = SCREEN_HOME;
-
-// Host commands (must be sent before any register access)
-#define FT_GPU_ACTIVE_M         0x00
-#define FT_GPU_EXTERNAL_OSC     0x44
-
-// ============================================================================
-// LOW-LEVEL SPI OPERATIONS
-// ============================================================================
-
-static esp_err_t spi_write_read(const uint8_t *tx, uint8_t *rx, size_t len)
+// SPI transaction
+static void spi_xfer(const uint8_t *tx, uint8_t *rx, size_t len)
 {
-    spi_transaction_t trans = {
+    spi_transaction_t t = {
         .length = len * 8,
         .tx_buffer = tx,
         .rx_buffer = rx
     };
-    return spi_device_transmit(g_spi, &trans);
+    spi_device_transmit(spi, &t);
 }
 
-static void ft813_host_cmd(uint8_t cmd)
+// Host command (single byte)
+static void hostcmd(uint8_t cmd)
 {
-    uint8_t buf[3] = {cmd, 0x00, 0x00};
-    spi_write_read(buf, NULL, 3);
+    uint8_t tx[3] = {cmd, 0, 0};
+    spi_xfer(tx, NULL, 3);
 }
 
-static uint8_t ft813_rd8(uint32_t addr)
+// Read register 16-bit
+static uint16_t rd16(uint32_t addr)
 {
-    uint8_t tx[5] = {(addr >> 16) & 0x3F, (addr >> 8) & 0xFF, addr & 0xFF, 0, 0};
-    uint8_t rx[5];
-    spi_write_read(tx, rx, 5);
-    return rx[4];
+    uint8_t tx[6] = {
+        (addr >> 16) & 0x3F,
+        (addr >> 8) & 0xFF,
+        addr & 0xFF,
+        0, 0, 0  // dummy + 2 data bytes
+    };
+    uint8_t rx[6];
+    spi_xfer(tx, rx, 6);
+    return (rx[5] << 8) | rx[4];
 }
 
-static void ft813_wr8(uint32_t addr, uint8_t val)
+// Read register 32-bit
+static uint32_t rd32(uint32_t addr)
 {
-    uint8_t tx[4] = {0x80 | ((addr >> 16) & 0x3F), (addr >> 8) & 0xFF, addr & 0xFF, val};
-    spi_write_read(tx, NULL, 4);
+    uint8_t tx[8] = {
+        (addr >> 16) & 0x3F,
+        (addr >> 8) & 0xFF,
+        addr & 0xFF,
+        0, 0, 0, 0, 0  // dummy + 4 data bytes
+    };
+    uint8_t rx[8];
+    spi_xfer(tx, rx, 8);
+    return (rx[7] << 24) | (rx[6] << 16) | (rx[5] << 8) | rx[4];
 }
 
-static void ft813_wr16(uint32_t addr, uint16_t val)
+// Write register 8-bit
+static void wr8(uint32_t addr, uint8_t val)
 {
-    uint8_t tx[5] = {0x80 | ((addr >> 16) & 0x3F), (addr >> 8) & 0xFF, addr & 0xFF, val & 0xFF, (val >> 8) & 0xFF};
-    spi_write_read(tx, NULL, 5);
+    uint8_t tx[4] = {
+        0x80 | ((addr >> 16) & 0x3F),
+        (addr >> 8) & 0xFF,
+        addr & 0xFF,
+        val
+    };
+    spi_xfer(tx, NULL, 4);
 }
 
-static void ft813_wr32(uint32_t addr, uint32_t val)
+// Write register 16-bit
+static void wr16(uint32_t addr, uint16_t val)
+{
+    uint8_t tx[5] = {
+        0x80 | ((addr >> 16) & 0x3F),
+        (addr >> 8) & 0xFF,
+        addr & 0xFF,
+        val & 0xFF,
+        (val >> 8) & 0xFF
+    };
+    spi_xfer(tx, NULL, 5);
+}
+
+// Write register 32-bit
+static void wr32(uint32_t addr, uint32_t val)
 {
     uint8_t tx[7] = {
-        0x80 | ((addr >> 16) & 0x3F), 
-        (addr >> 8) & 0xFF, 
+        0x80 | ((addr >> 16) & 0x3F),
+        (addr >> 8) & 0xFF,
         addr & 0xFF,
         val & 0xFF,
         (val >> 8) & 0xFF,
         (val >> 16) & 0xFF,
         (val >> 24) & 0xFF
     };
-    spi_write_read(tx, NULL, 7);
+    spi_xfer(tx, NULL, 7);
 }
 
-// ============================================================================
-// COMMAND COPROCESSOR OPERATIONS
-// ============================================================================
+// GD2 style command buffer - For FT81x, stream to REG_CMDB_WRITE
+// Hardware auto-increments, we just keep writing bytes
 
-static uint16_t g_cmd_offset = 0;
+static uint8_t stream_buf[4096];  // Command buffer
+static size_t stream_pos = 0;  // Position in buffer
+static bool stream_active = false;
 
-static void cmd_start(void)
+// Start streaming to REG_CMDB_WRITE
+static void stream_begin(void)
 {
-    // Sync with coprocessor - read current write pointer
-    g_cmd_offset = ft813_rd8(FT813_REG_CMD_WRITE) | (ft813_rd8(FT813_REG_CMD_WRITE + 1) << 8);
+    if (stream_active) return;
+    
+    stream_pos = 0;
+    stream_active = true;
 }
 
-static void cmd_write(uint32_t data)
+// Write a byte to command buffer
+static void cmdbyte(uint8_t b)
 {
-    ft813_wr32(FT813_RAM_CMD + g_cmd_offset, data);
-    g_cmd_offset = (g_cmd_offset + 4) & 0xFFF;
+    if (!stream_active) stream_begin();
+    stream_buf[stream_pos++] = b;
+    
+    if (stream_pos >= sizeof(stream_buf)) {
+        // Buffer full, flush it
+        wr32(FT813_REG_CMDB_WRITE, *(uint32_t*)&stream_buf[0]);
+        for (size_t i = 4; i < stream_pos; i += 4) {
+            wr32(FT813_REG_CMDB_WRITE, *(uint32_t*)&stream_buf[i]);
+        }
+        stream_pos = 0;
+    }
 }
 
-static void cmd_execute(void)
+// Write 32-bit command
+static void cmd32(uint32_t val)
 {
-    // Update write pointer to trigger execution
-    ft813_wr16(FT813_REG_CMD_WRITE, g_cmd_offset);
+    cmdbyte(val & 0xFF);
+    cmdbyte((val >> 8) & 0xFF);
+    cmdbyte((val >> 16) & 0xFF);
+    cmdbyte((val >> 24) & 0xFF);
+}
+
+// Write string to command buffer (null terminated, padded to 4-byte boundary)
+static void cmd_str(const char *s)
+{
+    size_t len = strlen(s) + 1;  // include null
+    for (size_t i = 0; i < len; i++) {
+        cmdbyte(s[i]);
+    }
+    // Pad to 4-byte boundary
+    while ((len & 3) != 0) {
+        cmdbyte(0);
+        len++;
+    }
+}
+
+// Flush any pending commands
+static void flush(void)
+{
+    if (!stream_active) {
+        ESP_LOGW(TAG, "flush() called but stream not active!");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Flushing %u bytes from command buffer", stream_pos);
+    
+    // Pad to 4-byte boundary
+    while (stream_pos & 3) {
+        stream_buf[stream_pos++] = 0;
+    }
+    
+    // Write all buffered commands
+    for (size_t i = 0; i < stream_pos; i += 4) {
+        wr32(FT813_REG_CMDB_WRITE, *(uint32_t*)&stream_buf[i]);
+    }
+    
+    ESP_LOGI(TAG, "Flushed %u bytes to REG_CMDB_WRITE", stream_pos);
+    stream_pos = 0;
+    stream_active = false;
+}
+
+// Wait for coprocessor to finish
+static void finish(void)
+{
+    // Flush any pending commands first
+    flush();
     
     // Wait for coprocessor to catch up
-    vTaskDelay(pdMS_TO_TICKS(20));
-}
-
-static void cmd_text(int16_t x, int16_t y, int16_t font, uint16_t options, const char *str)
-{
-    cmd_write(CMD_TEXT);
-    cmd_write(((uint32_t)y << 16) | (uint32_t)x);
-    cmd_write(((uint32_t)options << 16) | (uint32_t)font);
-    
-    // Write string padded to 4-byte boundary
-    size_t len = strlen(str) + 1;
-    for (size_t i = 0; i < len; i += 4) {
-        uint32_t chunk = 0;
-        for (int j = 0; j < 4 && (i + j) < len; j++) {
-            chunk |= ((uint32_t)str[i + j]) << (j * 8);
+    uint16_t rp, wp;
+    int timeout = 1000;
+    do {
+        rp = rd16(FT813_REG_CMD_READ) & 0xFFF;
+        wp = rd16(FT813_REG_CMD_WRITE) & 0xFFF;
+        if (rp == wp) {
+            ESP_LOGI(TAG, "Commands complete: RP=WP=%u", rp);
+            return;
         }
-        cmd_write(chunk);
-    }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    } while (--timeout > 0);
+    ESP_LOGE(TAG, "Timeout! RP=%u WP=%u", rp, wp);
 }
 
-static void cmd_button(int16_t x, int16_t y, int16_t w, int16_t h, int16_t font, uint16_t options, const char *str)
+// GD2-style command functions
+static void cmd_dlstart(void)
 {
-    cmd_write(CMD_BUTTON);
-    cmd_write(((uint32_t)y << 16) | (uint32_t)x);
-    cmd_write(((uint32_t)h << 16) | (uint32_t)w);
-    cmd_write(((uint32_t)options << 16) | (uint32_t)font);
-    
-    size_t len = strlen(str) + 1;
-    for (size_t i = 0; i < len; i += 4) {
-        uint32_t chunk = 0;
-        for (int j = 0; j < 4 && (i + j) < len; j++) {
-            chunk |= ((uint32_t)str[i + j]) << (j * 8);
-        }
-        cmd_write(chunk);
-    }
+    cmd32(0xFFFFFF00);  // CMD_DLSTART
 }
 
-static void cmd_bgcolor(uint32_t color)
+static void cmd_swap(void)
 {
-    cmd_write(CMD_BGCOLOR);
-    cmd_write(color);
+    cmd32(0xFFFFFF01);  // CMD_SWAP
 }
 
-static void cmd_fgcolor(uint32_t color)
+static void cmd_text(int16_t x, int16_t y, int16_t font, uint16_t options, const char *s)
 {
-    cmd_write(CMD_FGCOLOR);
-    cmd_write(color);
+    cmd32(0xFFFFFF0C);  // CMD_TEXT
+    cmd32((((uint32_t)y) << 16) | (x & 0xFFFF));
+    cmd32((((uint32_t)options) << 16) | (font & 0xFFFF));
+    cmd_str(s);
 }
 
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
+static void cmd_button(int16_t x, int16_t y, int16_t w, int16_t h, int16_t font, uint16_t options, const char *s)
+{
+    cmd32(0xFFFFFF0D);  // CMD_BUTTON
+    cmd32((((uint32_t)y) << 16) | (x & 0xFFFF));
+    cmd32((((uint32_t)h) << 16) | (w & 0xFFFF));
+    cmd32((((uint32_t)options) << 16) | (font & 0xFFFF));
+    cmd_str(s);
+}
 
+// Initialize FT813
 esp_err_t ft813_init(void)
 {
-    esp_err_t ret;
+    ESP_LOGI(TAG, "=== GD2-Style FT813 Initialization ===");
     
-    // Configure PD pin
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << FT813_PIN_PD),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_conf);
-    
-    // Power cycle
+    // GPIO setup
+    gpio_set_direction(FT813_PIN_PD, GPIO_MODE_OUTPUT);
     gpio_set_level(FT813_PIN_PD, 0);
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(20));
     gpio_set_level(FT813_PIN_PD, 1);
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(100));
     
-    // Configure SPI
-    spi_bus_config_t bus_cfg = {
+    // SPI setup
+    spi_bus_config_t buscfg = {
         .mosi_io_num = FT813_PIN_MOSI,
         .miso_io_num = FT813_PIN_MISO,
         .sclk_io_num = FT813_PIN_CLK,
@@ -179,182 +253,81 @@ esp_err_t ft813_init(void)
         .quadhd_io_num = -1,
         .max_transfer_sz = 4096
     };
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
     
-    ret = spi_bus_initialize(FT813_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK) return ret;
-    
-    spi_device_interface_config_t dev_cfg = {
-        .clock_speed_hz = 4000000,
+    spi_device_interface_config_t devcfg = {
+        .clock_speed_hz = 10*1000*1000,  // 10 MHz
         .mode = 0,
         .spics_io_num = FT813_PIN_CS,
         .queue_size = 7
     };
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &spi));
     
-    ret = spi_bus_add_device(FT813_SPI_HOST, &dev_cfg, &g_spi);
-    if (ret != ESP_OK) return ret;
+    // FT813 initialization sequence
+    hostcmd(0x68);  // CLKEXT
+    hostcmd(0x44);  // CLKSEL
+    hostcmd(0x00);  // ACTIVE
+    vTaskDelay(pdMS_TO_TICKS(300));
     
-    // Send host commands
-    ft813_host_cmd(FT_GPU_ACTIVE_M);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    ft813_host_cmd(FT_GPU_EXTERNAL_OSC);
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // Read chip ID
+    uint8_t id = rd32(FT813_REG_ID) & 0xFF;
+    ESP_LOGI(TAG, "Chip ID: 0x%02X (expect 0x7C)", id);
     
-    // Wait for chip ID
-    for (int i = 0; i < 100; i++) {
-        uint8_t chip_id = ft813_rd8(FT813_REG_ID);
-        if (chip_id == 0x7C) {
-            ESP_LOGI(TAG, "FT813 ready (ID: 0x%02X)", chip_id);
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
+    // Configure display timing for 800x480
+    wr16(FT813_REG_HCYCLE, 928);
+    wr16(FT813_REG_HOFFSET, 88);
+    wr16(FT813_REG_HSYNC0, 0);
+    wr16(FT813_REG_HSYNC1, 48);
+    wr16(FT813_REG_VCYCLE, 525);
+    wr16(FT813_REG_VOFFSET, 32);
+    wr16(FT813_REG_VSYNC0, 0);
+    wr16(FT813_REG_VSYNC1, 3);
+    wr8(FT813_REG_SWIZZLE, 0);
+    wr8(FT813_REG_PCLK_POL, 1);
+    wr16(FT813_REG_HSIZE, 800);
+    wr16(FT813_REG_VSIZE, 480);
     
-    // Configure display timing (800x480)
-    ft813_wr16(FT813_REG_HSIZE, 800);
-    ft813_wr16(FT813_REG_HCYCLE, 928);
-    ft813_wr16(FT813_REG_HOFFSET, 88);
-    ft813_wr16(FT813_REG_HSYNC0, 0);
-    ft813_wr16(FT813_REG_HSYNC1, 48);
-    ft813_wr16(FT813_REG_VSIZE, 480);
-    ft813_wr16(FT813_REG_VCYCLE, 525);
-    ft813_wr16(FT813_REG_VOFFSET, 32);
-    ft813_wr16(FT813_REG_VSYNC0, 0);
-    ft813_wr16(FT813_REG_VSYNC1, 3);
-    ft813_wr8(FT813_REG_SWIZZLE, 0);
-    ft813_wr8(FT813_REG_PCLK_POL, 1);
-    ft813_wr8(FT813_REG_CSPREAD, 0);
-    ft813_wr8(FT813_REG_DITHER, 1);
+    // Clear display list
+    wr32(FT813_RAM_DL + 0, 0x02000000);  // CLEAR_COLOR_RGB(0,0,0)
+    wr32(FT813_RAM_DL + 4, 0x26000007);  // CLEAR(1,1,1)
+    wr32(FT813_RAM_DL + 8, 0x00000000);  // DISPLAY
+    wr8(FT813_REG_DLSWAP, 2);  // DLSWAP_FRAME
     
-    // Enable display clock first
-    ft813_wr8(FT813_REG_PCLK, 2);
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // Enable display
+    wr8(FT813_REG_GPIO_DIR, 0x80);
+    wr8(FT813_REG_GPIO, 0x80);
+    wr8(FT813_REG_PCLK, 2);
+    wr8(FT813_REG_PWM_DUTY, 128);  // 50% backlight
     
-    // Try PWM duty cycle at 0 (which might mean full brightness on some displays)
-    ft813_wr16(FT813_REG_PWM_HZ, 250);
-    ft813_wr8(FT813_REG_PWM_DUTY, 0);  // Try 0 first
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    // If that doesn't work, try 128 (50%)
-    ft813_wr8(FT813_REG_PWM_DUTY, 128);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    // Now set all GPIO pins high as well
-    ft813_wr8(FT813_REG_GPIO_DIR, 0xFF);
-    ft813_wr8(FT813_REG_GPIO, 0xFF);
-    
-    // Read back to verify
-    uint8_t gpio_dir = ft813_rd8(FT813_REG_GPIO_DIR);
-    uint8_t gpio = ft813_rd8(FT813_REG_GPIO);
-    uint8_t pwm_duty = ft813_rd8(FT813_REG_PWM_DUTY);
-    ESP_LOGI(TAG, "GPIO_DIR: 0x%02X, GPIO: 0x%02X, PWM_DUTY: %d", gpio_dir, gpio, pwm_duty);
-    
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    ESP_LOGI(TAG, "Display initialized");
-    
+    ESP_LOGI(TAG, "FT813 initialized - black screen should be visible");
     return ESP_OK;
 }
 
-// ============================================================================
-// UI SCREENS
-// ============================================================================
-
-void ft813_draw_screen(screen_t screen)
+// GD2-style hello world test
+esp_err_t ft813_draw_hello_world(void)
 {
-    g_current_screen = screen;
+    ESP_LOGI(TAG, "=== GD2-Style Hello World ===");
     
-    cmd_start();
-    cmd_write(CMD_DLSTART);
-    cmd_write(CLEAR_COLOR_RGB(30, 30, 40));
-    cmd_write(CLEAR(1, 1, 1));
+    // Read initial command buffer state
+    uint16_t rp = rd16(FT813_REG_CMD_READ) & 0xFFF;
+    uint16_t wp = rd16(FT813_REG_CMD_WRITE) & 0xFFF;
+    ESP_LOGI(TAG, "Initial: RP=%u WP=%u", rp, wp);
     
-    switch (screen) {
-        case SCREEN_HOME:
-            cmd_bgcolor(0x003870);
-            cmd_fgcolor(0x0088CC);
-            
-            cmd_write(COLOR_RGB(255, 255, 255));
-            cmd_text(400, 30, 31, 0x0600, "Storm Digital");
-            
-            cmd_write(TAG(1));
-            cmd_button(250, 100, 300, 80, 31, 0, "Settings");
-            
-            cmd_write(TAG(2));
-            cmd_button(250, 220, 300, 80, 31, 0, "Information");
-            
-            cmd_write(TAG(3));
-            cmd_button(250, 340, 300, 80, 31, 0, "Options");
-            break;
-            
-        case SCREEN_SETTINGS:
-            cmd_bgcolor(0x387000);
-            cmd_fgcolor(0x88CC00);
-            
-            cmd_write(COLOR_RGB(255, 255, 255));
-            cmd_text(400, 100, 31, 0x0600, "Settings");
-            cmd_text(400, 200, 28, 0x0600, "Configuration");
-            
-            cmd_write(TAG(10));
-            cmd_button(50, 400, 200, 60, 29, 0, "< Back");
-            break;
-            
-        case SCREEN_INFO:
-            cmd_bgcolor(0x703800);
-            cmd_fgcolor(0xCC8800);
-            
-            cmd_write(COLOR_RGB(255, 255, 255));
-            cmd_text(400, 80, 31, 0x0600, "Information");
-            cmd_text(400, 160, 27, 0x0600, "ESP32-S3-N16R8");
-            cmd_text(400, 200, 27, 0x0600, "16MB Flash");
-            cmd_text(400, 240, 27, 0x0600, "8MB PSRAM");
-            
-            cmd_write(TAG(10));
-            cmd_button(50, 400, 200, 60, 29, 0, "< Back");
-            break;
-    }
+    // Build display list using coprocessor
+    cmd_dlstart();
+    cmd32(0x02FFFFFF);  // CLEAR_COLOR_RGB(255,255,255) - white
+    cmd32(0x26000007);  // CLEAR(1,1,1)
+    cmd32(0x04000000);  // COLOR_RGB(0,0,0) - black text
+    cmd_text(400, 150, 31, FT813_OPT_CENTER, "Hello World!");
+    cmd_text(400, 250, 27, FT813_OPT_CENTER, "FT813 + GD2 Style");
+    cmd_button(300, 320, 200, 60, 28, 0, "Click Me");
+    cmd32(0x00000000);  // DISPLAY
+    cmd_swap();
     
-    cmd_write(DISPLAY());
-    cmd_write(CMD_SWAP);
-    cmd_execute();
-}
-
-screen_t ft813_check_touch(void)
-{
-    uint8_t tag = ft813_rd8(FT813_REG_TOUCH_TAG);
+    // Execute commands
+    ESP_LOGI(TAG, "Commands queued, executing...");
+    finish();
     
-    if (tag == 0) return g_current_screen;
-    
-    // Debounce
-    vTaskDelay(pdMS_TO_TICKS(200));
-    
-    switch (g_current_screen) {
-        case SCREEN_HOME:
-            if (tag == 1) return SCREEN_SETTINGS;
-            if (tag == 2) return SCREEN_INFO;
-            break;
-            
-        case SCREEN_SETTINGS:
-        case SCREEN_INFO:
-            if (tag == 10) return SCREEN_HOME;
-            break;
-    }
-    
-    return g_current_screen;
-}
-
-// ============================================================================
-// UI TASK
-// ============================================================================
-
-void ft813_ui_task(void *pvParameters)
-{
-    ft813_draw_screen(g_current_screen);
-    
-    while (1) {
-        screen_t new_screen = ft813_check_touch();
-        if (new_screen != g_current_screen) {
-            ft813_draw_screen(new_screen);
-        }
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
+    ESP_LOGI(TAG, "Done! Check display for text and button");
+    return ESP_OK;
 }

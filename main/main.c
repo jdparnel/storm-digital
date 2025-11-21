@@ -9,7 +9,7 @@
 #include "esp_flash.h"
 #include "esp_chip_info.h"
 #include "nvs_flash.h"
-#include "ft813_display.h"
+#include "ft813.h"
 
 static const char *TAG = "ESP32S3-N16R8";
 
@@ -58,14 +58,23 @@ void print_system_info(void)
 
 void test_ft813_display(void)
 {
-    ESP_LOGI(TAG, "=== Starting Simple FT813 Display Test ===");
+    ESP_LOGI(TAG, "=== Starting FT813 Display Test ===");
     
-    // Run the simple test (it handles its own SPI initialization)
-    esp_err_t ret = ft813_simple_test();
+    // Initialize FT813
+    esp_err_t ret = ft813_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "FT813 init failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    // Draw hello world display
+    ret = ft813_draw_hello_world();
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Simple FT813 test completed successfully!");
+        ESP_LOGI(TAG, "Display test completed successfully!");
     } else {
-        ESP_LOGE(TAG, "Simple FT813 test failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Display test failed: %s", esp_err_to_name(ret));
     }
 }
 
