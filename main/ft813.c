@@ -342,12 +342,10 @@ esp_err_t ft813_init(void)
     ESP_LOGI(TAG, "Size: HSIZE=%u VSIZE=%u", rd32(FT813_REG_HSIZE) & 0xFFFF, rd32(FT813_REG_VSIZE) & 0xFFFF);
     ESP_LOGI(TAG, "Misc: SWIZZLE=%u CSPREAD=%u PCLK_POL=%u DITHER=%u PCLK=%u", sw, cp, pp, di, pk);
     
-    // Maximum backlight for best visibility
-    wr8(FT813_REG_PWM_DUTY, 255);  // 100% backlight
-    
     // =============================================================================
     // CONFIGURE CAPACITIVE TOUCH (FT813 Datasheet pp. 32-35)
     // =============================================================================
+    // Configure touch BEFORE backlight to avoid electrical noise interference
     // For capacitive touch displays (CTP), use extended mode
     // Mode 3 = CTOUCH_MODE_EXTENDED for 5-point capacitive touch
     wr8(FT813_REG_CTOUCH_EXTENDED, 0x00);  // Set to compatibility mode first
@@ -356,8 +354,22 @@ esp_err_t ft813_init(void)
     // Configure touch parameters for capacitive touch
     wr16(FT813_REG_TOUCH_RZTHRESH, 1200);  // Touch resistance threshold
     wr8(FT813_REG_TOUCH_MODE, FT813_TOUCH_MODE_CONTINUOUS);  // Continuous touch sampling
-    wr8(FT813_REG_TOUCH_OVERSAMPLE, 7);    // Touch oversample (0-15, higher = more stable)
-    wr8(FT813_REG_TOUCH_SETTLE, 3);        // Touch settle time
+    wr8(FT813_REG_TOUCH_OVERSAMPLE, 15);   // Touch oversample (0-15, max for stability with PWM noise)
+    wr8(FT813_REG_TOUCH_SETTLE, 5);        // Touch settle time (increased for PWM noise immunity)
+    
+    vTaskDelay(pdMS_TO_TICKS(50));  // Let touch controller stabilize
+    
+    // Configure backlight PWM before setting duty cycle
+    // REG_PWM_HZ: Backlight PWM frequency (default 250 Hz, range 0-128)
+    // Higher frequency = less flicker, but may cause EMI
+    wr16(FT813_REG_PWM_HZ, 250);  // 250 Hz PWM frequency (standard for backlight)
+    
+    // Set backlight duty cycle after PWM frequency is configured
+    // 50% duty cycle to manage power/thermal load (760mA @ 100% → ~380mA @ 50%)
+    wr8(FT813_REG_PWM_DUTY, 128);  // 50% backlight (128/255 ≈ 0.50)
+    ESP_LOGI(TAG, "Backlight PWM configured: 250 Hz, 50%% duty cycle (~380mA vs 760mA at 100%%)");
+    
+    vTaskDelay(pdMS_TO_TICKS(50));  // Allow power supply to stabilize after backlight change
     
     // Note: Calibration for capacitive touch is typically not needed
     // as CTP controllers have built-in calibration. If calibration is needed,

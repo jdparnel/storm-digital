@@ -19,6 +19,91 @@ This is an ESP-IDF project for the ESP32-S3-N16R8 module with FT813 EVE graphics
 - **Interface**: SPI @ 10MHz
 - **Touch**: Capacitive (CTP)
 
+### Thermocouple Sensor
+- **Controller**: MAX31856 Precision Thermocouple-to-Digital Converter
+- **Board**: Adafruit MAX31856 Breakout
+- **Type**: K-Type Thermocouple (configurable for B, E, J, K, N, R, S, T)
+- **Interface**: SPI @ 5MHz
+- **Accuracy**: ±0.15% typical
+- **Resolution**: 19-bit (0.0078125°C)
+- **Cold Junction**: Built-in compensation with 14-bit resolution
+
+## Power Supply
+
+### ESP32-S3 Board Regulators
+
+The ESP32-S3 development board uses one of the following 3.3V linear regulators:
+- **AMS1117-3.3**: SOT-223 package, 1A max, ~1.1V dropout @ 800mA
+- **SGM2212-3.3**: SOT-23-5/SOT-89 package, 300-600mA (variant dependent), ~200-300mV dropout
+
+**Input**: USB 5V (typically 4.75-5.25V under load)  
+**Output**: 3.3V regulated (expect 3.25-3.35V under normal load)
+
+### Power Consumption Estimates
+
+| Component | Idle/Typical | Peak | Notes |
+|-----------|--------------|------|-------|
+| ESP32-S3 Module | 40-70 mA | 240 mA | WiFi off, CPU active + PSRAM |
+| FT813 + Display Logic | 100 mA | 100 mA | Per NH datasheet (NHD-7.0-800480FT) |
+| Display Backlight | 760 mA | 760 mA | **@ 3.3V per NH datasheet; major load** |
+| MAX31856 Sensor | 1-2 mA | 5 mA | Active continuous conversion |
+| **Total (typical)** | **901-932 mA** | **1105 mA** | **Without WiFi; exceeds typical linear regulator capacity** |
+| **Total (with WiFi)** | **1021-1112 mA** | **1285+ mA** | WiFi TX adds ~120-180 mA; **requires high-current supply** |
+
+### Thermal Considerations
+
+**Linear Regulator Heat Dissipation:**
+- Power dissipated: *P = (Vin - Vout) × I*
+- **Critical**: Display backlight draws 760 mA @ 3.3V per NH datasheet
+- Example at 900 mA total: *(5.0V - 3.3V) × 0.9A = 1.53W*
+- **AMS1117 (1A max) will be operating at/near limit with backlight on**
+- **SGM2212 (300-600mA typical) CANNOT supply full backlight current**
+- Case temperature will easily exceed **80-100°C** at 900+ mA continuous load
+
+**⚠️ IMPORTANT: Backlight Power Considerations**
+- **760 mA backlight @ 3.3V = 2.5W** is too high for most dev board linear regulators
+- Many NH displays have **separate backlight power input** (check your specific model)
+- If backlight shares 3.3V rail: **dedicated high-current supply or buck converter required**
+- Typical solutions:
+  1. **Separate backlight driver**: External constant-current LED driver with PWM dimming
+  2. **Direct 5V backlight**: Some panels accept 5V directly (verify datasheet)
+  3. **Buck converter**: High-efficiency DC/DC (e.g., LM2596, MP1584) for 3.3V @ 1.5A+
+  4. **Reduce brightness**: PWM dimming to 30-50% can reduce current to 230-380 mA
+
+**Normal Temperature Range:**
+- Warm to touch (40-55°C): Normal under moderate load
+- Hot but briefly touchable (55-70°C): Acceptable if within regulator specs; consider mitigation
+- Too hot to touch (>70°C): **Expected with 760mA backlight on linear regulator**
+- **>80°C**: Review load immediately; linear regulator likely inadequate
+
+**Thermal Mitigation Options:**
+1. **Reduce backlight brightness**: PWM duty cycle adjustment (biggest impact; 50% duty → ~380mA)
+2. **Add heatsinking**: Copper tape or small clip-on heatsink to SOT-223 tab (AMS1117)
+3. **External 3.3V supply**: Bypass USB 5V→3.3V drop with regulated switching supply
+4. **Upgrade to buck converter**: **STRONGLY RECOMMENDED** - Replace linear regulator with high-efficiency DC/DC module (>85% efficiency vs ~66% for linear from 5V)
+5. **Separate backlight supply**: Independent constant-current driver or boost converter for LED backlight
+
+### Power Supply Pins
+
+**FT813 Display:**
+- VCC: 3.3V from ESP32-S3 board regulator
+- GND: Common ground with ESP32-S3
+- Display Logic: 100 mA (per NH datasheet)
+- **Backlight: 760 mA @ 3.3V (per NH datasheet) - see thermal considerations above**
+- **⚠️ Total display current (860 mA) likely exceeds onboard regulator capacity**
+
+**MAX31856 Breakout:**
+- VIN: 3.3V from ESP32-S3 board (breakout accepts 3.0-5.5V; onboard LDO provides 3.3V to IC)
+- GND: Common ground with ESP32-S3
+- Current: 1-2 mA typical (negligible impact on thermal budget)
+- **Do NOT use 3VO pin as input** (it's a regulated output from the breakout's onboard LDO)
+
+**Safety Notes:**
+- Measure 3.3V rail under load before adding peripherals
+- Ensure stable voltage (≥3.25V) during peak current draw
+- Monitor regulator temperature during initial testing
+- Consider USB power meter for real-time current monitoring
+
 ## Hardware Connections
 
 ### FT813 Display to ESP32-S3 Wiring
@@ -30,11 +115,49 @@ This is an ESP-IDF project for the ESP32-S3-N16R8 module with FT813 EVE graphics
 | SCK          | GPIO 12       | SPI Clock |
 | CS           | GPIO 10       | Chip Select |
 | PD (Reset)   | GPIO 5        | Power Down / Reset |
+| VCC          | 3.3V          | Power supply |
+| GND          | GND           | Ground |
 
 **SPI Configuration:**
 - **Mode**: 0 (CPOL=0, CPHA=0)
 - **Speed**: 10 MHz
 - **Host**: SPI2_HOST
+
+### MAX31856 Thermocouple to ESP32-S3 Wiring
+
+| MAX31856 Signal | ESP32-S3 GPIO | Description |
+|-----------------|---------------|-------------|
+| SDI (MOSI)      | GPIO 35       | SPI Master Out |
+| SDO (MISO)      | GPIO 37       | SPI Master In |
+| SCK             | GPIO 36       | SPI Clock |
+| CS              | GPIO 15       | Chip Select (non-JTAG pin) |
+| VIN             | 3.3V          | Power supply (3.0-5.5V input) |
+| GND             | GND           | Ground |
+
+**SPI Configuration:**
+- **Mode**: 1 (CPOL=0, CPHA=1)
+- **Initial Speed**: 10 kHz (configuration phase)
+- **Runtime Speed**: 50 kHz (after successful config)
+- **Host**: SPI3_HOST
+- **Note**: Slow speeds required due to marginal MOSI signal integrity. Higher speeds (100kHz+) cause register write failures.
+
+**Conversion Mode:**
+- Continuous auto-conversion (CR0=0xB0)
+- K-type thermocouple with 16x averaging (CR1=0x43)
+- Open-circuit fault detection enabled
+- Temperature updates every 500ms
+
+**Thermocouple Connection:**
+- **Yellow wire (+)** → TC+ terminal (Chromel, positive)
+- **Red wire (−)** → TC− terminal (Alumel, negative)
+- K-type thermocouple range: -200°C to +1372°C
+- Cold junction compensation: automatic via onboard sensor
+
+**Important Notes:**
+- ESP32-S3 GPIO26-37 are **NOT** reserved on ESP32-S3 (safe for peripherals)
+- Two independent SPI buses allow simultaneous display and sensor operation
+- Ensure 3.3V power supply for both FT813 display and MAX31856
+- Connect common GND between ESP32-S3, display, and thermocouple board
 
 **Important Notes:**
 - ESP32-S3 GPIO26-37 are reserved for flash/PSRAM - do not use for FT813

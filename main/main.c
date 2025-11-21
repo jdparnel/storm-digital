@@ -10,6 +10,7 @@
 #include "esp_chip_info.h"
 #include "nvs_flash.h"
 #include "ft813.h"
+#include "max31856.h"
 #include "screens.h"
 
 static const char *TAG = "ESP32S3-N16R8";
@@ -74,6 +75,28 @@ void test_ft813_display(void)
     ESP_LOGI(TAG, "FT813 initialized successfully");
 }
 
+static void init_max31856(void)
+{
+    ESP_LOGI(TAG, "Initializing MAX31856 thermocouple reader...");
+    esp_err_t ret = max31856_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "MAX31856 initialization failed!");
+        return;
+    }
+    ESP_LOGI(TAG, "MAX31856 initialized successfully!");
+    // Dump registers for diagnostics
+    max31856_dump_registers();
+
+    // Wait for first auto-conversion to complete
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    max31856_reading_t r = {0};
+    if (max31856_read_temperature(&r) == ESP_OK) {
+        ESP_LOGI(TAG, "Initial reading: TC=%.2f°C CJ=%.2f°C",
+                 r.temp_c, r.cold_junction_c);
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "ESP32-S3-N16R8 Project Starting...");
@@ -95,6 +118,9 @@ void app_main(void)
     // Initialize and test FT813 display
     test_ft813_display();
     
+    // Initialize MAX31856 thermocouple reader
+    init_max31856();
+    
     ESP_LOGI(TAG, "Setup completed successfully!");
     ESP_LOGI(TAG, "Starting interactive touch demo...");
     
@@ -106,8 +132,8 @@ void app_main(void)
         // Read touch inputs from FT813
         ft813_get_touch_inputs(&touch_inputs);
         
-        // Update display with touch information
-        screen_touch_demo(&touch_inputs);
+        // Render current screen
+        screens_render(&touch_inputs);
         
         // ~30 fps target (PCLK=4)
         vTaskDelay(pdMS_TO_TICKS(33));
