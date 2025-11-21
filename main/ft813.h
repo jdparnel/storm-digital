@@ -41,6 +41,35 @@
 #define FT813_REG_PWM_DUTY      0x3020D4
 #define FT813_REG_FREQUENCY     0x30200C
 
+// Touch Screen Registers (FT813 Datasheet pp. 32-35)
+#define FT813_REG_TOUCH_MODE        0x302104    // Touch screen sampling mode
+#define FT813_REG_TOUCH_ADC_MODE    0x302108    // Touch screen ADC mode
+#define FT813_REG_TOUCH_CHARGE      0x30210C    // Touch charge time
+#define FT813_REG_TOUCH_SETTLE      0x302110    // Touch settle time
+#define FT813_REG_TOUCH_OVERSAMPLE  0x302114    // Touch oversample
+#define FT813_REG_TOUCH_RZTHRESH    0x302118    // Touch resistance threshold
+#define FT813_REG_TOUCH_RAW_XY      0x30211C    // Touch raw X/Y
+#define FT813_REG_TOUCH_RZ          0x302120    // Touch resistance
+#define FT813_REG_TOUCH_SCREEN_XY   0x302124    // Touch screen X/Y (calibrated)
+#define FT813_REG_TOUCH_TAG_XY      0x302128    // Touch tag X/Y
+#define FT813_REG_TOUCH_TAG         0x30212C    // Touch tag
+#define FT813_REG_TOUCH_TAG1_XY     0x302130    // Multi-touch tag1 XY
+#define FT813_REG_TOUCH_TAG1        0x302134    // Multi-touch tag1
+#define FT813_REG_TOUCH_TAG2_XY     0x302138    // Multi-touch tag2 XY
+#define FT813_REG_TOUCH_TAG2        0x30213C    // Multi-touch tag2
+#define FT813_REG_TOUCH_TAG3_XY     0x302140    // Multi-touch tag3 XY
+#define FT813_REG_TOUCH_TAG3        0x302144    // Multi-touch tag3
+#define FT813_REG_TOUCH_TAG4_XY     0x302148    // Multi-touch tag4 XY
+#define FT813_REG_TOUCH_TAG4        0x30214C    // Multi-touch tag4
+#define FT813_REG_TOUCH_TRANSFORM_A 0x302150    // Touch transform coefficient A
+#define FT813_REG_TOUCH_TRANSFORM_B 0x302154    // Touch transform coefficient B
+#define FT813_REG_TOUCH_TRANSFORM_C 0x302158    // Touch transform coefficient C
+#define FT813_REG_TOUCH_TRANSFORM_D 0x30215C    // Touch transform coefficient D
+#define FT813_REG_TOUCH_TRANSFORM_E 0x302160    // Touch transform coefficient E
+#define FT813_REG_TOUCH_TRANSFORM_F 0x302164    // Touch transform coefficient F
+#define FT813_REG_CTOUCH_EXTENDED   0x302108    // Extended CTouch mode (same as TOUCH_ADC_MODE)
+#define FT813_REG_TAG               0x30207C    // Current tag value
+
 // Memory Map
 #define FT813_RAM_DL            0x300000    // Display List RAM
 #define FT813_RAM_CMD           0x308000    // Command FIFO RAM
@@ -80,9 +109,31 @@
 #define FT813_OPT_SIGNED        0x0100      // Signed number
 #define FT813_OPT_RIGHTX        0x0800      // Right-aligned
 
-// Public API
+// Touch Modes
+#define FT813_TOUCH_MODE_OFF    0           // Touch detection off
+#define FT813_TOUCH_MODE_ONESHOT 1          // One shot mode
+#define FT813_TOUCH_MODE_FRAME  2           // Frame mode (continuous)
+#define FT813_TOUCH_MODE_CONTINUOUS 3       // Continuous mode
+
+// Touch Input Structure (similar to GD2 library)
+typedef struct {
+    int16_t x;              // Touch X coordinate (-32768 = not touching)
+    int16_t y;              // Touch Y coordinate
+    uint8_t tag;            // Tag value of touched object
+    uint8_t touching;       // 1 if screen is touched, 0 if not
+} ft813_touch_t;
+
+// Public API - Hardware Initialization
 esp_err_t ft813_init(void);
-esp_err_t ft813_draw_hello_world(void);
-void ft813_test_pclk_settings(uint8_t pclk, uint8_t pclk_pol);
+
+// Touch Input API
+void ft813_get_touch_inputs(ft813_touch_t *inputs);
+
+// Low-level Command Building API (for screens module)
+void ft813_cmd32(uint32_t val);
+void ft813_cmd_text(int16_t x, int16_t y, int16_t font, uint16_t options, const char *s);
+void ft813_cmd_button(int16_t x, int16_t y, int16_t w, int16_t h, int16_t font, uint16_t options, const char *s);
+void ft813_cmd_tag(uint8_t tag_value);
+void ft813_swap(void);
 
 #endif // FT813_H

@@ -136,7 +136,7 @@ static void cmdbyte(uint8_t b)
 }
 
 // Write 32-bit command
-static void cmd32(uint32_t val)
+void ft813_cmd32(uint32_t val)
 {
     cmdbyte(val & 0xFF);
     cmdbyte((val >> 8) & 0xFF);
@@ -162,11 +162,8 @@ static void cmd_str(const char *s)
 static void flush(void)
 {
     if (!stream_active) {
-        ESP_LOGW(TAG, "flush() called but stream not active!");
         return;
     }
-    
-    ESP_LOGI(TAG, "Flushing %u bytes from command buffer", stream_pos);
     
     // Pad to 4-byte boundary
     while (stream_pos & 3) {
@@ -178,7 +175,7 @@ static void flush(void)
         wr32(FT813_REG_CMDB_WRITE, *(uint32_t*)&stream_buf[i]);
     }
     
-    ESP_LOGI(TAG, "Flushed %u bytes to REG_CMDB_WRITE", stream_pos);
+    // Reset buffer
     stream_pos = 0;
     stream_active = false;
 }
@@ -189,47 +186,69 @@ static void finish(void)
     // Flush any pending commands first
     flush();
     
-    // Wait for coprocessor to catch up
+    // Wait for coprocessor to catch up (without logging to avoid flicker)
     uint16_t rp, wp;
-    int timeout = 1000;
+    int timeout = 100;  // Reduced timeout since we're checking every 1ms
     do {
         rp = rd16(FT813_REG_CMD_READ) & 0xFFF;
         wp = rd16(FT813_REG_CMD_WRITE) & 0xFFF;
         if (rp == wp) {
-            ESP_LOGI(TAG, "Commands complete: RP=WP=%u", rp);
             return;
         }
         vTaskDelay(pdMS_TO_TICKS(1));
     } while (--timeout > 0);
-    ESP_LOGE(TAG, "Timeout! RP=%u WP=%u", rp, wp);
+    // Timeout occurred but don't log to avoid screen flicker
 }
 
-// GD2-style command functions
+// GD2-style command functions matching library implementation
 static void cmd_dlstart(void)
 {
-    cmd32(0xFFFFFF00);  // CMD_DLSTART
+    ft813_cmd32(0xFFFFFF00);  // CMD_DLSTART
 }
 
 static void cmd_swap(void)
 {
-    cmd32(0xFFFFFF01);  // CMD_SWAP
+    ft813_cmd32(0xFFFFFF01);  // CMD_SWAP
 }
 
-static void cmd_text(int16_t x, int16_t y, int16_t font, uint16_t options, const char *s)
+static void cmd_loadidentity(void)
 {
-    cmd32(0xFFFFFF0C);  // CMD_TEXT
-    cmd32((((uint32_t)y) << 16) | (x & 0xFFFF));
-    cmd32((((uint32_t)options) << 16) | (font & 0xFFFF));
+    ft813_cmd32(0xFFFFFF26);  // CMD_LOADIDENTITY
+}
+
+// GD2 swap pattern: Display() → cmd_swap() → cmd_loadidentity() → cmd_dlstart() → flush()
+void ft813_swap(void)
+{
+    ft813_cmd32(0x00000000);  // DISPLAY
+    cmd_swap();         // CMD_SWAP
+    cmd_loadidentity(); // CMD_LOADIDENTITY
+    cmd_dlstart();      // CMD_DLSTART for next frame
+    flush();            // Write to hardware
+    finish();           // Ensure coprocessor processed previous list
+}
+
+void ft813_cmd_text(int16_t x, int16_t y, int16_t font, uint16_t options, const char *s)
+{
+    ft813_cmd32(0xFFFFFF0C);  // CMD_TEXT
+    ft813_cmd32((((uint32_t)y) << 16) | (x & 0xFFFF));
+    ft813_cmd32((((uint32_t)options) << 16) | (font & 0xFFFF));
     cmd_str(s);
 }
 
-static void cmd_button(int16_t x, int16_t y, int16_t w, int16_t h, int16_t font, uint16_t options, const char *s)
+void ft813_cmd_button(int16_t x, int16_t y, int16_t w, int16_t h, int16_t font, uint16_t options, const char *s)
 {
-    cmd32(0xFFFFFF0D);  // CMD_BUTTON
-    cmd32((((uint32_t)y) << 16) | (x & 0xFFFF));
-    cmd32((((uint32_t)h) << 16) | (w & 0xFFFF));
-    cmd32((((uint32_t)options) << 16) | (font & 0xFFFF));
+    ft813_cmd32(0xFFFFFF0D);  // CMD_BUTTON
+    ft813_cmd32((((uint32_t)y) << 16) | (x & 0xFFFF));
+    ft813_cmd32((((uint32_t)h) << 16) | (w & 0xFFFF));
+    ft813_cmd32((((uint32_t)options) << 16) | (font & 0xFFFF));
     cmd_str(s);
+}
+
+// GD2-style tag assignment - call before drawing tagged object
+void ft813_cmd_tag(uint8_t tag_value)
+{
+    // Use display list command for tag assignment
+    ft813_cmd32(0x03000000 | tag_value);  // TAG(n) display list command
 }
 
 // Initialize FT813
@@ -273,7 +292,9 @@ esp_err_t ft813_init(void)
     uint8_t id = rd32(FT813_REG_ID) & 0xFF;
     ESP_LOGI(TAG, "Chip ID: 0x%02X (expect 0x7C)", id);
     
-    // Configure display timing for 800x480
+    // Configure display timing for 800x480 (Newhaven FT813 7" reference + Bowman original)
+    // Datasheet typical values: HCYCLE=928, HSIZE=800, HOFFSET=88, HSYNC0=0, HSYNC1=48
+    // VCYCLE=525, VSIZE=480, VOFFSET=32, VSYNC0=0, VSYNC1=3, PCLK_POL=1, SWIZZLE=0, CSPREAD=1, DITHER=1
     wr16(FT813_REG_HCYCLE, 928);
     wr16(FT813_REG_HOFFSET, 88);
     wr16(FT813_REG_HSYNC0, 0);
@@ -282,11 +303,12 @@ esp_err_t ft813_init(void)
     wr16(FT813_REG_VOFFSET, 32);
     wr16(FT813_REG_VSYNC0, 0);
     wr16(FT813_REG_VSYNC1, 3);
-    wr8(FT813_REG_SWIZZLE, 0);
-    wr8(FT813_REG_PCLK_POL, 1);
-    wr8(FT813_REG_DITHER, 1);  // Enable dithering for smoother gradients
     wr16(FT813_REG_HSIZE, 800);
     wr16(FT813_REG_VSIZE, 480);
+    wr8(FT813_REG_SWIZZLE, 0);
+    wr8(FT813_REG_CSPREAD, 1);  // Clock spread enable (reduces EMI, recommended)
+    wr8(FT813_REG_PCLK_POL, 1);
+    wr8(FT813_REG_DITHER, 1);   // Enable dithering for smoother gradients
     
     // Clear display list
     wr32(FT813_RAM_DL + 0, 0x02000000);  // CLEAR_COLOR_RGB(0,0,0)
@@ -298,85 +320,73 @@ esp_err_t ft813_init(void)
     wr8(FT813_REG_GPIO_DIR, 0x80);
     wr8(FT813_REG_GPIO, 0x80);
     
-    // PCLK=4 provides 30 fps (middle ground: sharp + smooth)
-    // PCLK=3: 41 fps (smoother)
-    // PCLK=5: 24.6 fps (sharpest but flickered)
-    wr8(FT813_REG_PCLK, 4);
+    // Original Bowman/Newhaven typical pixel clock divider: PCLK=2 (~60 Hz frame)
+    // Try PCLK=2 first to remove periodic full redraw artifact. Can iterate later.
+    wr8(FT813_REG_PCLK, 2);
+
+    // Read back and log timing registers for verification
+    uint16_t hc = rd32(FT813_REG_HCYCLE) & 0xFFFF;
+    uint16_t ho = rd32(FT813_REG_HOFFSET) & 0xFFFF;
+    uint16_t h0 = rd32(FT813_REG_HSYNC0) & 0xFFFF;
+    uint16_t h1 = rd32(FT813_REG_HSYNC1) & 0xFFFF;
+    uint16_t vc = rd32(FT813_REG_VCYCLE) & 0xFFFF;
+    uint16_t vo = rd32(FT813_REG_VOFFSET) & 0xFFFF;
+    uint16_t v0 = rd32(FT813_REG_VSYNC0) & 0xFFFF;
+    uint16_t v1 = rd32(FT813_REG_VSYNC1) & 0xFFFF;
+    uint8_t sw = rd32(FT813_REG_SWIZZLE) & 0xFF;
+    uint8_t cp = rd32(FT813_REG_CSPREAD) & 0xFF;
+    uint8_t pp = rd32(FT813_REG_PCLK_POL) & 0xFF;
+    uint8_t di = rd32(FT813_REG_DITHER) & 0xFF;
+    uint8_t pk = rd32(FT813_REG_PCLK) & 0xFF;
+    ESP_LOGI(TAG, "Timing set: HCYCLE=%u HOFFSET=%u HSYNC0=%u HSYNC1=%u VCYCLE=%u VOFFSET=%u VSYNC0=%u VSYNC1=%u", hc, ho, h0, h1, vc, vo, v0, v1);
+    ESP_LOGI(TAG, "Size: HSIZE=%u VSIZE=%u", rd32(FT813_REG_HSIZE) & 0xFFFF, rd32(FT813_REG_VSIZE) & 0xFFFF);
+    ESP_LOGI(TAG, "Misc: SWIZZLE=%u CSPREAD=%u PCLK_POL=%u DITHER=%u PCLK=%u", sw, cp, pp, di, pk);
     
     // Maximum backlight for best visibility
     wr8(FT813_REG_PWM_DUTY, 255);  // 100% backlight
+    
+    // =============================================================================
+    // CONFIGURE CAPACITIVE TOUCH (FT813 Datasheet pp. 32-35)
+    // =============================================================================
+    // For capacitive touch displays (CTP), use extended mode
+    // Mode 3 = CTOUCH_MODE_EXTENDED for 5-point capacitive touch
+    wr8(FT813_REG_CTOUCH_EXTENDED, 0x00);  // Set to compatibility mode first
+    vTaskDelay(pdMS_TO_TICKS(10));
+    
+    // Configure touch parameters for capacitive touch
+    wr16(FT813_REG_TOUCH_RZTHRESH, 1200);  // Touch resistance threshold
+    wr8(FT813_REG_TOUCH_MODE, FT813_TOUCH_MODE_CONTINUOUS);  // Continuous touch sampling
+    wr8(FT813_REG_TOUCH_OVERSAMPLE, 7);    // Touch oversample (0-15, higher = more stable)
+    wr8(FT813_REG_TOUCH_SETTLE, 3);        // Touch settle time
+    
+    // Note: Calibration for capacitive touch is typically not needed
+    // as CTP controllers have built-in calibration. If calibration is needed,
+    // use CMD_CALIBRATE command.
+    
+    ESP_LOGI(TAG, "Capacitive touch configured in continuous mode");
     
     ESP_LOGI(TAG, "FT813 initialized - black screen should be visible");
     return ESP_OK;
 }
 
-// GD2-style hello world test
-esp_err_t ft813_draw_hello_world(void)
-{
-    ESP_LOGI(TAG, "=== GD2-Style Hello World ===");
-    
-    // Read initial command buffer state
-    uint16_t rp = rd16(FT813_REG_CMD_READ) & 0xFFF;
-    uint16_t wp = rd16(FT813_REG_CMD_WRITE) & 0xFFF;
-    ESP_LOGI(TAG, "Initial: RP=%u WP=%u", rp, wp);
-    
-    // Build display list using coprocessor
-    cmd_dlstart();
-    cmd32(0x02FFFFFF);  // CLEAR_COLOR_RGB(255,255,255) - white
-    cmd32(0x26000007);  // CLEAR(1,1,1)
-    cmd32(0x04000000);  // COLOR_RGB(0,0,0) - black text
-    
-    // Use larger, smoother fonts: 31 (biggest) or 29
-    cmd_text(400, 120, 31, FT813_OPT_CENTER, "Hello World!");
-    cmd_text(400, 200, 29, FT813_OPT_CENTER, "FT813 Display Test");
-    cmd_text(400, 260, 28, FT813_OPT_CENTER, "800x480 Resolution");
-    
-    // 3D button at 41 fps should render smoothly
-    cmd_button(300, 340, 200, 70, 29, 0, "Click Me");
-    
-    cmd32(0x00000000);  // DISPLAY
-    cmd_swap();
-    
-    // Execute commands
-    ESP_LOGI(TAG, "Commands queued, executing...");
-    finish();
-    
-    ESP_LOGI(TAG, "Done! Check display for text and button");
-    return ESP_OK;
-}
+// =============================================================================
+// CAPACITIVE TOUCH INPUT FUNCTIONS (FT813 Datasheet pp. 32-35)
+// =============================================================================
 
-// Test different PCLK and polarity settings
-void ft813_test_pclk_settings(uint8_t pclk, uint8_t pclk_pol)
+// Read touch inputs from FT813 (following GD2 library pattern)
+void ft813_get_touch_inputs(ft813_touch_t *inputs)
 {
-    ESP_LOGI(TAG, "Testing PCLK=%u PCLK_POL=%u", pclk, pclk_pol);
+    if (!inputs) return;
     
-    // Update display timing
-    wr8(FT813_REG_PCLK, 0);  // Disable display during update
-    wr8(FT813_REG_PCLK_POL, pclk_pol);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    wr8(FT813_REG_PCLK, pclk);  // Re-enable with new settings
+    // Read touch screen coordinates (32-bit: Y in upper 16 bits, X in lower 16 bits)
+    // FT813 returns -32768 (0x8000) when not touching
+    uint32_t xy = rd32(FT813_REG_TOUCH_SCREEN_XY);
+    inputs->x = (int16_t)(xy & 0xFFFF);
+    inputs->y = (int16_t)((xy >> 16) & 0xFFFF);
     
-    // Redraw screen with settings info
-    cmd_dlstart();
-    cmd32(0x02FFFFFF);  // White background
-    cmd32(0x26000007);  // CLEAR
-    cmd32(0x04000000);  // Black text
+    // Read tag value (which tagged object is being touched)
+    inputs->tag = rd32(FT813_REG_TOUCH_TAG) & 0xFF;
     
-    cmd_text(400, 100, 31, FT813_OPT_CENTER, "Display Timing Test");
-    
-    char buf[64];
-    snprintf(buf, sizeof(buf), "PCLK = %u", pclk);
-    cmd_text(400, 180, 29, FT813_OPT_CENTER, buf);
-    
-    snprintf(buf, sizeof(buf), "PCLK_POL = %u", pclk_pol);
-    cmd_text(400, 240, 29, FT813_OPT_CENTER, buf);
-    
-    cmd_text(400, 320, 28, FT813_OPT_CENTER, "Does text look sharp?");
-    cmd_text(400, 360, 27, FT813_OPT_CENTER, "Compare different settings");
-    
-    cmd32(0x00000000);  // DISPLAY
-    cmd_swap();
-    finish();
-    
-    ESP_LOGI(TAG, "Display updated with PCLK=%u POL=%u", pclk, pclk_pol);
+    // Determine if touching (x != -32768 means touch detected)
+    inputs->touching = (inputs->x != -32768) ? 1 : 0;
 }

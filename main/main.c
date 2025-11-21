@@ -10,6 +10,7 @@
 #include "esp_chip_info.h"
 #include "nvs_flash.h"
 #include "ft813.h"
+#include "screens.h"
 
 static const char *TAG = "ESP32S3-N16R8";
 
@@ -69,13 +70,8 @@ void test_ft813_display(void)
     
     vTaskDelay(pdMS_TO_TICKS(500));
     
-    // Draw hello world display
-    ret = ft813_draw_hello_world();
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Display test completed successfully!");
-    } else {
-        ESP_LOGE(TAG, "Display test failed: %s", esp_err_to_name(ret));
-    }
+    // Skip hello world screen, go straight to touch demo
+    ESP_LOGI(TAG, "FT813 initialized successfully");
 }
 
 void app_main(void)
@@ -100,16 +96,20 @@ void app_main(void)
     test_ft813_display();
     
     ESP_LOGI(TAG, "Setup completed successfully!");
-    ESP_LOGI(TAG, "Display configured with PCLK=5 for optimal sharpness");
+    ESP_LOGI(TAG, "Starting interactive touch demo...");
     
-    // Main application loop
-    int counter = 0;
+    // Touch input variable
+    ft813_touch_t touch_inputs = {0};
+    
+    // Main application loop with touch input
     while (1) {
-        ESP_LOGI(TAG, "Hello from ESP32-S3-N16R8! Counter: %d", counter++);
-        ESP_LOGI(TAG, "Free heap: %d bytes | Free PSRAM: %d bytes", 
-                 esp_get_free_heap_size(), 
-                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        // Read touch inputs from FT813
+        ft813_get_touch_inputs(&touch_inputs);
         
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        // Update display with touch information
+        screen_touch_demo(&touch_inputs);
+        
+        // ~30 fps target (PCLK=4)
+        vTaskDelay(pdMS_TO_TICKS(33));
     }
 }
